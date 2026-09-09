@@ -120,6 +120,27 @@ func TestForwardEmptyPhotosIsArray(t *testing.T) {
 	}
 }
 
+func TestForwardConfiguredHeaderCannotReplaceProtocolHeaders(t *testing.T) {
+	srv, c := newServer(t, http.StatusOK)
+	f := New(srv.Client())
+	// Validation rejects these names, but the forwarder must be safe even
+	// if a value reaches it another way.
+	target := domain.Endpoint{URL: srv.URL, HeaderName: "content-type", HeaderValue: "text/plain"}
+	if err := f.Forward(context.Background(), target, samplePost()); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("content-type = %q, want application/json", got)
+	}
+	target.HeaderName, target.HeaderValue = "X-Idempotency-Key", "spoofed"
+	if err := f.Forward(context.Background(), target, samplePost()); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.header.Get("X-Idempotency-Key"); got != "123:46" {
+		t.Fatalf("idempotency key = %q", got)
+	}
+}
+
 func TestForwardStatusHandling(t *testing.T) {
 	cases := []struct {
 		status    int

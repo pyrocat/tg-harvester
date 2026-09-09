@@ -80,10 +80,21 @@ with backoff; any other `4xx` is permanent, stops that channel, and is shown
 in the UI — use **Skip to latest** to move past a post the endpoint will
 never accept.
 
+The auth header you configure cannot be named `Content-Type`,
+`X-Idempotency-Key` or another header the forwarder owns; those names are
+rejected when you save the settings.
+
 ## Behaviour notes
 
 - **Albums** are merged by `grouped_id`. A "settle delay" (10s by default)
   keeps a post that is still being uploaded from being split across polls.
+- **Backlogs** are delivered in full, oldest first: each poll reads the whole
+  range between the cursor and the newest message. If a channel accumulates
+  more than 5000 unseen messages the service refuses to deliver a partial
+  slice — it reports the backlog and waits for you to press **Skip to
+  latest**, so nothing is ever skipped silently.
+- Each channel gets at most 5 minutes per cycle, so one slow or huge channel
+  cannot starve the others; it simply continues on the next poll.
 - **Rate limits**: Telegram `FLOOD_WAIT` is honoured automatically, and the
   scheduler pauses for the requested period. Keep the interval at 30s or more.
 - **Private channels** work only if the account is already a member; joining

@@ -44,6 +44,18 @@ func (e *FloodWaitError) Error() string {
 	return fmt.Sprintf("telegram flood wait: retry after %s", e.Wait)
 }
 
+// BacklogError reports that a channel has accumulated more unseen messages
+// than the harvester is willing to fetch in one go. Delivering only the
+// newest part would silently skip the older ones, so nothing is delivered
+// until the user skips ahead.
+type BacklogError struct {
+	Limit int
+}
+
+func (e *BacklogError) Error() string {
+	return fmt.Sprintf("more than %d unseen messages; use \"Skip to latest\" to resume from the newest post", e.Limit)
+}
+
 // ValidationError describes invalid user input.
 type ValidationError struct {
 	Field string

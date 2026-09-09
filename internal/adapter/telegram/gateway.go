@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"sort"
 
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/tg"
@@ -70,39 +69,30 @@ func (c *Client) topMessageID(ctx context.Context, api *tg.Client, ch domain.Cha
 	return top, nil
 }
 
-// Fetch returns up to limit messages newer than afterID, oldest first.
-func (c *Client) Fetch(ctx context.Context, ch domain.Channel, afterID int64, limit int) ([]domain.Message, error) {
+// Fetch returns every message newer than afterID, oldest first, or a
+// *domain.BacklogError when there are more than max of them.
+func (c *Client) Fetch(ctx context.Context, ch domain.Channel, afterID int64, max int) ([]domain.Message, error) {
 	api, err := c.apiClient()
 	if err != nil {
 		return nil, err
 	}
-	// getHistory walks backwards from OffsetID. A negative AddOffset shifts
-	// the window to newer messages, so this returns the oldest `limit`
-	// messages that are newer than afterID; MinID guards the lower bound.
-	res, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-		Peer:      inputPeer(ch),
-		OffsetID:  int(afterID) + 1,
-		AddOffset: -limit,
-		Limit:     limit,
-		MinID:     int(afterID),
-	})
-	if err != nil {
-		return nil, mapError(err)
-	}
-	modified, ok := res.AsModified()
-	if !ok {
-		return nil, fmt.Errorf("unexpected history response %T", res)
-	}
-	raw := modified.GetMessages()
-	msgs := convertMessages(ch, raw, usersByID(modified.GetUsers()))
-	filtered := msgs[:0]
-	for _, m := range msgs {
-		if m.ID > afterID {
-			filtered = append(filtered, m)
+	page := func(ctx context.Context, offsetID, minID, limit int) (tg.ModifiedMessagesMessages, error) {
+		res, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+			Peer:     inputPeer(ch),
+			OffsetID: offsetID,
+			Limit:    limit,
+			MinID:    minID,
+		})
+		if err != nil {
+			return nil, mapError(err)
 		}
+		modified, ok := res.AsModified()
+		if !ok {
+			return nil, fmt.Errorf("unexpected history response %T", res)
+		}
+		return modified, nil
 	}
-	sort.Slice(filtered, func(i, j int) bool { return filtered[i].ID < filtered[j].ID })
-	return filtered, nil
+	return collectNew(ctx, ch, page, afterID, max)
 }
 
 // Download fetches the bytes of a photo, refreshing the file reference once

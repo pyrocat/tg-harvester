@@ -81,10 +81,25 @@ Rules that keep this honest:
 
 - **At-least-once delivery.** The per-channel cursor advances only after the
   endpoint answers 2xx (`Harvester.PollChannel`). Never advance it earlier.
+- **Whole-range fetching.** `collectNew` (`adapter/telegram/history.go`) walks
+  history backwards from the newest message down to the cursor, so the
+  harvester always holds the complete unseen range. Never replace it with a
+  window anchored at the cursor: if Telegram returned the newest slice of a
+  larger backlog, advancing the cursor past it would silently skip older
+  posts. A backlog above `Harvester.MaxBacklog` is refused with
+  `*domain.BacklogError` rather than partially delivered.
 - **Album integrity.** Messages sharing a `grouped_id` are delivered as one
-  post. A trailing album is held back at a page boundary, and the fetch window
-  widens if the album fills the page (`Harvester.fetchPosts`), so an album is
-  never split and a channel never stalls.
+  post. `domain.GroupPosts` may assume every album it sees is complete,
+  precisely because the whole unseen range is fetched; the settle delay keeps
+  out an album that is still uploading.
+- **One owner for flood waits.** The gotd middleware sleeps through waits up
+  to `maxInlineFloodWait` only; longer ones surface as
+  `*domain.FloodWaitError` so the scheduler can pause visibly. Do not make
+  the middleware retry unboundedly — a long wait would block every other
+  channel while the UI still showed "polling".
+- **One slow channel must not starve the others.** `Harvester.pollBounded`
+  gives each channel its own `ChannelTimeout`; only the caller's own
+  cancellation aborts the whole cycle.
 - **Login failures wait for the user; connection failures reconnect with
   backoff.** The distinction is `errors.Is(err, domain.ErrUnauthorized)`
   (`SessionManager.supervise`). Wrap new auth-type failures in
@@ -107,9 +122,9 @@ Rules that keep this honest:
 
 ## Known gaps
 
-- The `messages.getHistory` window used by `Client.Fetch`
-  (`OffsetID = afterID+1`, `AddOffset = -limit`, `MinID = afterID`) is guarded
-  by `MinID` but has not been confirmed against a live channel.
+- Harvesting has been exercised only against a simulated history
+  (`history_test.go`). A live channel with a real backlog, deleted-ID gaps and
+  an album crossing a page boundary has not been run yet.
 - Only photos are forwarded; videos and documents are ignored.
 - Private channels require the account to already be a member; joining by
   invite link is not implemented.

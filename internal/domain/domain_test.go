@@ -102,6 +102,8 @@ func TestSettingsValidate(t *testing.T) {
 		{"header name only", func(s *Settings) { s.Endpoint.HeaderValue = "" }},
 		{"header newline", func(s *Settings) { s.Endpoint.HeaderValue = "a\r\nb" }},
 		{"header bad name", func(s *Settings) { s.Endpoint.HeaderName = "X Y" }},
+		{"header reserved", func(s *Settings) { s.Endpoint.HeaderName = "Content-Type" }},
+		{"header reserved any case", func(s *Settings) { s.Endpoint.HeaderName = "x-idempotency-key" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -130,11 +132,8 @@ func TestGroupPosts(t *testing.T) {
 		{ID: 7, GroupedID: 99, Date: at, Author: author, Photo: ref(7)},
 	}
 
-	t.Run("last page groups everything", func(t *testing.T) {
-		posts, held := GroupPosts(ch, msgs, false)
-		if held != 0 {
-			t.Fatalf("held = %d, want 0", held)
-		}
+	t.Run("groups albums and singles", func(t *testing.T) {
+		posts := GroupPosts(ch, msgs)
 		if len(posts) != 4 {
 			t.Fatalf("len(posts) = %d, want 4", len(posts))
 		}
@@ -162,27 +161,21 @@ func TestGroupPosts(t *testing.T) {
 		}
 	})
 
-	t.Run("full page holds back trailing album", func(t *testing.T) {
-		posts, held := GroupPosts(ch, msgs, true)
-		if held != 2 {
-			t.Fatalf("held = %d, want 2", held)
-		}
-		if len(posts) != 3 || posts[2].MaxID() != 5 {
+	t.Run("adjacent albums stay separate", func(t *testing.T) {
+		posts := GroupPosts(ch, msgs[5:])
+		if len(posts) != 1 || posts[0].GroupedID != 99 {
 			t.Fatalf("posts = %+v", posts)
 		}
-	})
-
-	t.Run("full page does not hold back trailing single", func(t *testing.T) {
-		posts, held := GroupPosts(ch, msgs[:5], true)
-		if held != 0 || len(posts) != 3 {
-			t.Fatalf("held = %d, posts = %d", held, len(posts))
+		mixed := append([]Message{}, msgs[1:4]...)
+		mixed = append(mixed, msgs[5:]...)
+		if posts := GroupPosts(ch, mixed); len(posts) != 2 {
+			t.Fatalf("two adjacent albums must give two posts, got %d", len(posts))
 		}
 	})
 
 	t.Run("empty input", func(t *testing.T) {
-		posts, held := GroupPosts(ch, nil, true)
-		if held != 0 || len(posts) != 0 {
-			t.Fatalf("held = %d, posts = %d", held, len(posts))
+		if posts := GroupPosts(ch, nil); len(posts) != 0 {
+			t.Fatalf("posts = %+v", posts)
 		}
 	})
 }

@@ -16,8 +16,11 @@ type MessageSource interface {
 	// Resolve looks up a public channel by username and returns it with
 	// Cursor set to the ID of its newest message.
 	Resolve(ctx context.Context, username string) (domain.Channel, error)
-	// Fetch returns up to limit messages with ID > afterID, ascending by ID.
-	Fetch(ctx context.Context, ch domain.Channel, afterID int64, limit int) ([]domain.Message, error)
+	// Fetch returns every message with ID > afterID, oldest first. When the
+	// channel holds more than max such messages it returns a
+	// *domain.BacklogError instead: delivering only the newest part would
+	// skip the older ones.
+	Fetch(ctx context.Context, ch domain.Channel, afterID int64, max int) ([]domain.Message, error)
 	// Download returns the bytes of a photo.
 	Download(ctx context.Context, ref domain.PhotoRef) ([]byte, error)
 }
@@ -49,24 +52,29 @@ type Harvester struct {
 	settings SettingsStore
 	log      *slog.Logger
 
-	PageSize    int
-	MaxPages    int
-	RetryDelays []time.Duration
-	now         func() time.Time
+	// MaxBacklog caps how many unseen messages a channel may have before it
+	// needs a manual "Skip to latest".
+	MaxBacklog int
+	// ChannelTimeout bounds one channel's share of a poll cycle so that a
+	// slow channel cannot starve the others; delivery resumes next cycle
+	// from the persisted cursor. Zero disables the bound.
+	ChannelTimeout time.Duration
+	RetryDelays    []time.Duration
+	now            func() time.Time
 }
 
 // NewHarvester wires a Harvester with production defaults.
 func NewHarvester(src MessageSource, fwd Forwarder, channels ChannelCursorStore, settings SettingsStore, log *slog.Logger) *Harvester {
 	return &Harvester{
-		src:         src,
-		fwd:         fwd,
-		channels:    channels,
-		settings:    settings,
-		log:         log,
-		PageSize:    100,
-		MaxPages:    5,
-		RetryDelays: []time.Duration{time.Second, 4 * time.Second, 16 * time.Second},
-		now:         time.Now,
+		src:            src,
+		fwd:            fwd,
+		channels:       channels,
+		settings:       settings,
+		log:            log,
+		MaxBacklog:     5000,
+		ChannelTimeout: 5 * time.Minute,
+		RetryDelays:    []time.Duration{time.Second, 4 * time.Second, 16 * time.Second},
+		now:            time.Now,
 	}
 }
 
@@ -87,7 +95,7 @@ func (h *Harvester) PollAll(ctx context.Context) error {
 		return fmt.Errorf("list channels: %w", err)
 	}
 	for _, ch := range channels {
-		err := h.PollChannel(ctx, ch, settings)
+		err := h.pollBounded(ctx, ch, settings)
 		msg := ""
 		if err != nil {
 			msg = err.Error()
@@ -96,75 +104,49 @@ func (h *Harvester) PollAll(ctx context.Context) error {
 		if rerr := h.channels.RecordPoll(ctx, ch.ID, h.now(), msg); rerr != nil && err == nil {
 			err = fmt.Errorf("record poll: %w", rerr)
 		}
-		if err != nil && isGlobal(err) {
+		if err != nil && (ctx.Err() != nil || isGlobal(err)) {
 			return err
 		}
 	}
 	return nil
 }
 
-// maxAlbumSize is Telegram's limit on the number of messages in one media group.
-const maxAlbumSize = 10
+// pollBounded runs PollChannel under ChannelTimeout and turns the channel's
+// own deadline into a per-channel error, as opposed to the caller's
+// cancellation which propagates.
+func (h *Harvester) pollBounded(ctx context.Context, ch domain.Channel, settings domain.Settings) error {
+	cctx := ctx
+	if h.ChannelTimeout > 0 {
+		var cancel context.CancelFunc
+		cctx, cancel = context.WithTimeout(ctx, h.ChannelTimeout)
+		defer cancel()
+	}
+	err := h.PollChannel(cctx, ch, settings)
+	if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("stopped after %s; delivery continues next poll", h.ChannelTimeout)
+	}
+	return err
+}
 
-// PollChannel harvests one channel: fetch pages of new messages, group
-// albums, download photos, forward, and advance the cursor after each
+// PollChannel harvests one channel: fetch everything newer than the cursor,
+// group albums, download photos, forward, and advance the cursor after each
 // successful delivery.
 func (h *Harvester) PollChannel(ctx context.Context, ch domain.Channel, settings domain.Settings) error {
-	cursor := ch.Cursor
-	for page := 0; page < h.MaxPages; page++ {
-		posts, pageFull, err := h.fetchPosts(ctx, ch, cursor, h.now().Add(-settings.SettleDelay))
-		if err != nil {
-			return err
+	msgs, err := h.src.Fetch(ctx, ch, ch.Cursor, h.MaxBacklog)
+	if err != nil {
+		return fmt.Errorf("fetch after %d: %w", ch.Cursor, err)
+	}
+	msgs = settled(msgs, h.now().Add(-settings.SettleDelay))
+	for _, post := range domain.GroupPosts(ch, msgs) {
+		if err := h.deliver(ctx, settings.Endpoint, post); err != nil {
+			return fmt.Errorf("message %d: %w", post.FirstID(), err)
 		}
-		if len(posts) == 0 {
-			return nil
+		if err := h.channels.AdvanceCursor(ctx, ch.ID, post.MaxID(), h.now()); err != nil {
+			return fmt.Errorf("advance cursor to %d: %w", post.MaxID(), err)
 		}
-		for _, post := range posts {
-			if err := h.deliver(ctx, settings.Endpoint, post); err != nil {
-				return fmt.Errorf("message %d: %w", post.FirstID(), err)
-			}
-			cursor = post.MaxID()
-			if err := h.channels.AdvanceCursor(ctx, ch.ID, cursor, h.now()); err != nil {
-				return fmt.Errorf("advance cursor to %d: %w", cursor, err)
-			}
-			h.log.Info("post forwarded", "channel", ch.DisplayName(), "message_id", post.FirstID(), "photos", len(post.Photos))
-		}
-		if !pageFull {
-			return nil
-		}
+		h.log.Info("post forwarded", "channel", ch.DisplayName(), "message_id", post.FirstID(), "photos", len(post.Photos))
 	}
 	return nil
-}
-
-// fetchPosts reads the next page of messages after cursor and groups them
-// into posts. A trailing album is held back because the rest of it may be on
-// the next page; when the held-back album fills the entire page the window is
-// widened so that the album can still be delivered whole instead of stalling
-// the channel.
-func (h *Harvester) fetchPosts(ctx context.Context, ch domain.Channel, cursor int64, cutoff time.Time) ([]domain.Post, bool, error) {
-	for limit := h.PageSize; ; limit += maxAlbumSize {
-		msgs, err := h.src.Fetch(ctx, ch, cursor, limit)
-		if err != nil {
-			return nil, false, fmt.Errorf("fetch after %d: %w", cursor, err)
-		}
-		pageFull := len(msgs) >= limit
-		msgs = settled(msgs, cutoff)
-		if len(msgs) == 0 {
-			return nil, false, nil
-		}
-		// The page is only "full" for grouping purposes if nothing was held
-		// back by the settle delay; a trimmed page has a known end.
-		posts, _ := domain.GroupPosts(ch, msgs, pageFull)
-		if len(posts) > 0 || !pageFull {
-			return posts, pageFull, nil
-		}
-		if limit > h.PageSize+maxAlbumSize {
-			// Larger than any real album: deliver what we have rather than
-			// retrying forever.
-			posts, _ = domain.GroupPosts(ch, msgs, false)
-			return posts, pageFull, nil
-		}
-	}
 }
 
 // settled keeps the leading run of messages older than cutoff, so that an
@@ -221,7 +203,5 @@ func isGlobal(err error) bool {
 	var fw *domain.FloodWaitError
 	return errors.As(err, &fw) ||
 		errors.Is(err, domain.ErrNotConnected) ||
-		errors.Is(err, domain.ErrUnauthorized) ||
-		errors.Is(err, context.Canceled) ||
-		errors.Is(err, context.DeadlineExceeded)
+		errors.Is(err, domain.ErrUnauthorized)
 }

@@ -98,12 +98,14 @@ func (f *Forwarder) Forward(ctx context.Context, target domain.Endpoint, post do
 	if err != nil {
 		return &domain.PermanentError{Err: fmt.Errorf("build request: %w", err)}
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", f.userAgent)
-	req.Header.Set("X-Idempotency-Key", fmt.Sprintf("%d:%d", post.Channel.ID, post.MaxID()))
+	// The configured header goes first so that the protocol headers below
+	// always win, whatever name the user chose.
 	if target.HeaderName != "" {
 		req.Header.Set(target.HeaderName, target.HeaderValue)
 	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", f.userAgent)
+	req.Header.Set("X-Idempotency-Key", fmt.Sprintf("%d:%d", post.Channel.ID, post.MaxID()))
 
 	resp, err := f.client.Do(req)
 	if err != nil {

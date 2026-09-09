@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -22,7 +23,9 @@ func discardLogger() *slog.Logger {
 type fakeSource struct {
 	msgs        map[domain.ChannelID][]domain.Message
 	fetchErr    map[domain.ChannelID]error
+	block       map[domain.ChannelID]bool // Fetch waits for ctx
 	fetches     int
+	lastMax     int
 	downloads   int
 	downloadErr error
 }
@@ -31,8 +34,15 @@ func (f *fakeSource) Resolve(context.Context, string) (domain.Channel, error) {
 	return domain.Channel{}, errors.New("not implemented")
 }
 
-func (f *fakeSource) Fetch(_ context.Context, ch domain.Channel, afterID int64, limit int) ([]domain.Message, error) {
+// Fetch mirrors the real contract: everything newer than afterID, oldest
+// first, or a BacklogError when there is more than max of it.
+func (f *fakeSource) Fetch(ctx context.Context, ch domain.Channel, afterID int64, max int) ([]domain.Message, error) {
 	f.fetches++
+	f.lastMax = max
+	if f.block[ch.ID] {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	if err := f.fetchErr[ch.ID]; err != nil {
 		return nil, err
 	}
@@ -41,9 +51,9 @@ func (f *fakeSource) Fetch(_ context.Context, ch domain.Channel, afterID int64, 
 		if m.ID > afterID {
 			out = append(out, m)
 		}
-		if len(out) == limit {
-			break
-		}
+	}
+	if len(out) > max {
+		return nil, &domain.BacklogError{Limit: max}
 	}
 	return out, nil
 }
@@ -175,6 +185,26 @@ func TestPollAllForwardsPostsAndAdvancesCursor(t *testing.T) {
 	if store.polls[1] != "" {
 		t.Errorf("poll error = %q, want empty", store.polls[1])
 	}
+	if src.lastMax != h.MaxBacklog {
+		t.Errorf("fetch limit = %d, want MaxBacklog %d", src.lastMax, h.MaxBacklog)
+	}
+}
+
+func TestPollAllResumesFromCursor(t *testing.T) {
+	ch := domain.Channel{ID: 1, Username: "chan", Enabled: true, Cursor: 2}
+	src := &fakeSource{msgs: map[domain.ChannelID][]domain.Message{
+		1: {msg(1, 0, "old", false), msg(2, 0, "old", false), msg(3, 0, "new", false)},
+	}}
+	fwd := &fakeForwarder{}
+	store := newFakeCursorStore(ch)
+	h := newTestHarvester(src, fwd, store, testSettings())
+
+	if err := h.PollAll(context.Background()); err != nil {
+		t.Fatalf("PollAll: %v", err)
+	}
+	if len(fwd.posts) != 1 || fwd.posts[0].FirstID() != 3 || store.cursors[1] != 3 {
+		t.Fatalf("posts = %+v cursor = %d", fwd.posts, store.cursors[1])
+	}
 }
 
 func TestPollAllFailureStopsChannelButNotOthers(t *testing.T) {
@@ -213,50 +243,73 @@ func TestPollAllFailureStopsChannelButNotOthers(t *testing.T) {
 	}
 }
 
-func TestPollChannelPaginates(t *testing.T) {
-	ch := domain.Channel{ID: 1, Username: "a", Enabled: true}
-	var msgs []domain.Message
-	for i := int64(1); i <= 5; i++ {
-		msgs = append(msgs, msg(i, 0, "m", false))
+func TestPollAllBacklogTooLargeIsPerChannel(t *testing.T) {
+	a := domain.Channel{ID: 1, Username: "a", Enabled: true}
+	b := domain.Channel{ID: 2, Username: "b", Enabled: true}
+	var many []domain.Message
+	for i := int64(1); i <= 4; i++ {
+		many = append(many, msg(i, 0, "m", false))
 	}
-	src := &fakeSource{msgs: map[domain.ChannelID][]domain.Message{1: msgs}}
+	src := &fakeSource{msgs: map[domain.ChannelID][]domain.Message{1: many, 2: {msg(1, 0, "b", false)}}}
 	fwd := &fakeForwarder{}
-	store := newFakeCursorStore(ch)
+	store := newFakeCursorStore(a, b)
 	h := newTestHarvester(src, fwd, store, testSettings())
-	h.PageSize = 2
+	h.MaxBacklog = 3
 
 	if err := h.PollAll(context.Background()); err != nil {
 		t.Fatalf("PollAll: %v", err)
 	}
-	if src.fetches != 3 {
-		t.Errorf("fetches = %d, want 3", src.fetches)
+	if _, ok := store.cursors[1]; ok {
+		t.Error("nothing may be delivered from a channel whose backlog is too large")
 	}
-	if store.cursors[1] != 5 || len(fwd.posts) != 5 {
-		t.Errorf("cursor = %d posts = %d", store.cursors[1], len(fwd.posts))
+	if !strings.Contains(store.polls[1], "Skip to latest") {
+		t.Errorf("channel a error = %q", store.polls[1])
+	}
+	if store.cursors[2] != 1 {
+		t.Errorf("channel b cursor = %d, want 1", store.cursors[2])
 	}
 }
 
-func TestPollChannelHoldsBackAlbumAtPageBoundary(t *testing.T) {
-	ch := domain.Channel{ID: 1, Username: "a", Enabled: true}
-	src := &fakeSource{msgs: map[domain.ChannelID][]domain.Message{
-		1: {msg(1, 0, "m", false), msg(2, 9, "album", true), msg(3, 9, "", true)},
-	}}
+func TestPollAllChannelTimeoutDoesNotAbortCycle(t *testing.T) {
+	a := domain.Channel{ID: 1, Username: "a", Enabled: true}
+	b := domain.Channel{ID: 2, Username: "b", Enabled: true}
+	src := &fakeSource{
+		msgs:  map[domain.ChannelID][]domain.Message{2: {msg(1, 0, "b", false)}},
+		block: map[domain.ChannelID]bool{1: true},
+	}
 	fwd := &fakeForwarder{}
-	store := newFakeCursorStore(ch)
+	store := newFakeCursorStore(a, b)
 	h := newTestHarvester(src, fwd, store, testSettings())
-	h.PageSize = 2
+	h.ChannelTimeout = 20 * time.Millisecond
 
 	if err := h.PollAll(context.Background()); err != nil {
 		t.Fatalf("PollAll: %v", err)
 	}
-	if len(fwd.posts) != 2 {
-		t.Fatalf("forwarded %d posts, want 2 (single + whole album)", len(fwd.posts))
+	if !strings.Contains(store.polls[1], "stopped after") {
+		t.Errorf("channel a error = %q", store.polls[1])
 	}
-	if got := fwd.posts[1].MessageIDs; len(got) != 2 || got[0] != 2 || got[1] != 3 {
-		t.Errorf("album ids = %v", got)
+	if store.cursors[2] != 1 {
+		t.Errorf("channel b cursor = %d; a slow channel must not starve the others", store.cursors[2])
 	}
-	if store.cursors[1] != 3 {
-		t.Errorf("cursor = %d, want 3", store.cursors[1])
+}
+
+func TestPollAllParentCancellationPropagates(t *testing.T) {
+	a := domain.Channel{ID: 1, Username: "a", Enabled: true}
+	b := domain.Channel{ID: 2, Username: "b", Enabled: true}
+	src := &fakeSource{block: map[domain.ChannelID]bool{1: true}}
+	store := newFakeCursorStore(a, b)
+	h := newTestHarvester(src, &fakeForwarder{}, store, testSettings())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		cancel()
+	}()
+	if err := h.PollAll(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+	if len(store.polled) != 1 {
+		t.Errorf("polled = %v; channel b must not run after cancellation", store.polled)
 	}
 }
 

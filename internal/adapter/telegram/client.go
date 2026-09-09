@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/gotd/contrib/middleware/floodwait"
 	"github.com/gotd/td/telegram"
@@ -18,6 +19,10 @@ import (
 	"tg-harvester/internal/app"
 	"tg-harvester/internal/domain"
 )
+
+// maxInlineFloodWait is the longest FLOOD_WAIT the client sleeps through on
+// its own; longer waits surface as domain.FloodWaitError.
+const maxInlineFloodWait = 30 * time.Second
 
 // Client runs a Telegram user session and serves message reads from it.
 type Client struct {
@@ -54,8 +59,13 @@ var _ app.TelegramRunner = (*Client)(nil)
 func (c *Client) Run(ctx context.Context, creds domain.Credentials, p app.AuthPrompter, ready func(string)) error {
 	client := telegram.NewClient(creds.APIID, creds.APIHash, telegram.Options{
 		SessionStorage: sessionStorage{store: c.sessions},
-		Middlewares:    []telegram.Middleware{floodwait.NewSimpleWaiter()},
-		Device:         c.device,
+		// Short flood waits are slept through transparently; anything longer
+		// escapes as an error so that the scheduler can pause visibly
+		// instead of one channel silently blocking the whole cycle.
+		Middlewares: []telegram.Middleware{
+			floodwait.NewSimpleWaiter().WithMaxWait(maxInlineFloodWait).WithMaxRetries(3),
+		},
+		Device: c.device,
 		// The harvester polls history; it does not need the update stream.
 		NoUpdates: true,
 	})

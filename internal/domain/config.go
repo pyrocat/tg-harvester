@@ -11,6 +11,17 @@ var (
 	hexHashRe    = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
 	phoneRe      = regexp.MustCompile(`^\+[1-9][0-9]{6,14}$`)
 	headerNameRe = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+.^_` + "`" + `|~-]+$`)
+
+	// reservedHeaders are owned by the forwarder; letting the user set them
+	// would corrupt the request.
+	reservedHeaders = map[string]bool{
+		"content-type":      true,
+		"content-length":    true,
+		"host":              true,
+		"transfer-encoding": true,
+		"connection":        true,
+		"x-idempotency-key": true,
+	}
 )
 
 // Credentials identify the Telegram application and the user account.
@@ -76,6 +87,9 @@ func (e Endpoint) Validate() error {
 	}
 	if e.HeaderName != "" && !headerNameRe.MatchString(e.HeaderName) {
 		return &ValidationError{Field: "endpoint_header", Msg: "header name contains invalid characters"}
+	}
+	if reservedHeaders[strings.ToLower(e.HeaderName)] {
+		return &ValidationError{Field: "endpoint_header", Msg: "header " + e.HeaderName + " is set by the forwarder and cannot be overridden"}
 	}
 	if strings.ContainsAny(e.HeaderValue, "\r\n") {
 		return &ValidationError{Field: "endpoint_header", Msg: "header value must not contain line breaks"}

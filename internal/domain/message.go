@@ -80,11 +80,12 @@ func (p Post) Link() string {
 }
 
 // GroupPosts merges adjacent messages that share a non-zero GroupedID into a
-// single Post. msgs must be sorted ascending by ID. When mayContinue is true
-// (the fetched page was full), a trailing album is held back because its
-// remaining members may be on the next page; held reports how many messages
-// were withheld.
-func GroupPosts(ch Channel, msgs []Message, mayContinue bool) (posts []Post, held int) {
+// single Post. msgs must be sorted ascending by ID and must contain every
+// message of each album it includes: the caller fetches the whole unseen
+// range, so the only album that can be incomplete is one still being
+// uploaded, which the settle delay keeps out.
+func GroupPosts(ch Channel, msgs []Message) []Post {
+	var posts []Post
 	for i := 0; i < len(msgs); {
 		first := msgs[i]
 		j := i + 1
@@ -92,14 +93,11 @@ func GroupPosts(ch Channel, msgs []Message, mayContinue bool) (posts []Post, hel
 			for j < len(msgs) && msgs[j].GroupedID == first.GroupedID {
 				j++
 			}
-			if mayContinue && j == len(msgs) {
-				return posts, j - i
-			}
 		}
 		posts = append(posts, buildPost(ch, msgs[i:j]))
 		i = j
 	}
-	return posts, 0
+	return posts
 }
 
 func buildPost(ch Channel, group []Message) Post {
