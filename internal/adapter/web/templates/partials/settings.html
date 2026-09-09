@@ -1,0 +1,34 @@
+{{define "settings"}}
+<section id="settings" class="card">
+    <div class="card-head"><h2>Endpoint &amp; schedule</h2></div>
+    {{with .Error}}<p class="error">{{.}}</p>{{end}}
+    {{with .Notice}}<p class="notice">{{.}}</p>{{end}}
+
+    <form hx-post="/settings" hx-target="#settings" hx-swap="outerHTML">
+        <label>Endpoint URL
+            <input type="url" name="endpoint_url" placeholder="https://example.com/hook" value="{{.Settings.Endpoint.URL}}">
+        </label>
+        <div class="row">
+            <label>Auth header name
+                <input type="text" name="header_name" placeholder="Authorization" value="{{.Settings.Endpoint.HeaderName}}">
+            </label>
+            <label>Auth header value
+                <input type="password" name="header_value" placeholder="Bearer …" value="{{.Settings.Endpoint.HeaderValue}}">
+            </label>
+        </div>
+        <div class="row">
+            <label>Poll interval (seconds)
+                <input type="number" name="poll_interval" min="10" max="86400" value="{{.IntervalSec}}" required>
+            </label>
+            <label>Settle delay (seconds)
+                <input type="number" name="settle_delay" min="0" max="600" value="{{.SettleSec}}" required>
+            </label>
+        </div>
+        <p class="muted">The settle delay lets albums finish uploading before they are forwarded.</p>
+        <div class="actions">
+            <button type="submit">Save</button>
+            <button type="button" hx-post="/settings/test" hx-target="#settings" hx-swap="outerHTML">Send test payload</button>
+        </div>
+    </form>
+</section>
+{{end}}

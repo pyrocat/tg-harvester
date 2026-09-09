@@ -1,0 +1,22 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>tg-harvester</title>
+    <script src="/static/htmx.min.js"></script>
+    <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+    <h1>tg-harvester</h1>
+    <p class="lede">Forwards new posts from Telegram channels to an HTTP endpoint.</p>
+</header>
+<main>
+    {{template "status" .Status}}
+    {{template "account" .Account}}
+    {{template "channels" .Channels}}
+    {{template "settings" .Settings}}
+</main>
+</body>
+</html>{{end}}

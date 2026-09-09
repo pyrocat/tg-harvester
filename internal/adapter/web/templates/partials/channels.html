@@ -1,0 +1,39 @@
+{{define "channels"}}
+<section id="channels" class="card">
+    <div class="card-head"><h2>Channels</h2></div>
+    {{with .Error}}<p class="error">{{.}}</p>{{end}}
+    {{with .Notice}}<p class="notice">{{.}}</p>{{end}}
+
+    <form hx-post="/channels" hx-target="#channels" hx-swap="outerHTML">
+        <label>Add a public channel
+            <input type="text" name="channel" placeholder="@durov or https://t.me/durov" value="{{.Value}}" required>
+        </label>
+        <button type="submit"{{if not .Authorized}} disabled{{end}}>Add</button>
+    </form>
+    {{if not .Authorized}}<p class="muted">Sign in to Telegram to add channels.</p>{{end}}
+
+    {{if .Channels}}
+        <ul class="channels">
+            {{range .Channels}}
+                <li{{if not .Enabled}} class="disabled"{{end}}>
+                    <span class="channel-name">
+                        <a href="{{.Link}}" target="_blank" rel="noreferrer">{{.DisplayName}}</a>
+                        {{if .Username}}<span class="muted">@{{.Username}}</span>{{end}}
+                    </span>
+                    <span class="channel-actions">
+                        <button type="button" hx-post="/channels/{{.ID}}/toggle" hx-target="#channels" hx-swap="outerHTML">
+                            {{if .Enabled}}Pause{{else}}Resume{{end}}
+                        </button>
+                        <button type="button" hx-post="/channels/{{.ID}}/reset" hx-target="#channels" hx-swap="outerHTML"
+                                hx-confirm="Skip everything not yet forwarded from {{.DisplayName}}?">Skip to latest</button>
+                        <button type="button" class="danger" hx-delete="/channels/{{.ID}}" hx-target="#channels" hx-swap="outerHTML"
+                                hx-confirm="Remove {{.DisplayName}}?">Remove</button>
+                    </span>
+                </li>
+            {{end}}
+        </ul>
+    {{else}}
+        <p class="muted">No channels yet.</p>
+    {{end}}
+</section>
+{{end}}

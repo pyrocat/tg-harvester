@@ -1,0 +1,48 @@
+{{define "account"}}
+<section id="account" class="card"{{if .Auth.State.Busy}} hx-get="/partials/account" hx-trigger="every 2s" hx-target="this" hx-swap="outerHTML"{{end}}>
+    <div class="card-head">
+        <h2>Telegram account</h2>
+        <span class="state state-{{.Auth.State}}">{{.Auth.State}}</span>
+    </div>
+    {{with .Error}}<p class="error">{{.}}</p>{{end}}
+    {{with .Notice}}<p class="notice">{{.}}</p>{{end}}
+
+    {{if eq .Auth.State.String "awaiting code"}}
+        <p>Enter the code Telegram sent{{with .Auth.CodeHint}} via {{.}}{{end}} to {{.Auth.Phone}}.</p>
+        <form hx-post="/account/code" hx-target="#account" hx-swap="outerHTML">
+            <label>Confirmation code
+                <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" required autofocus>
+            </label>
+            <button type="submit">Sign in</button>
+        </form>
+    {{else if eq .Auth.State.String "awaiting password"}}
+        <p>This account has two-factor authentication enabled.</p>
+        <form hx-post="/account/password" hx-target="#account" hx-swap="outerHTML">
+            <label>Password
+                <input type="password" name="password" autocomplete="current-password" required autofocus>
+            </label>
+            <button type="submit">Sign in</button>
+        </form>
+    {{else if eq .Auth.State.String "authorized"}}
+        <p>Signed in as <strong>{{.Auth.Account}}</strong> ({{.Auth.Phone}}).</p>
+        <form hx-post="/account/logout" hx-target="#account" hx-swap="outerHTML">
+            <button type="submit" class="danger">Log out</button>
+        </form>
+    {{else}}
+        {{with .Auth.Err}}<p class="error">{{.}}</p>{{end}}
+        <p class="muted">Create an application at <a href="https://my.telegram.org/apps" target="_blank" rel="noreferrer">my.telegram.org/apps</a> to get an API ID and hash.</p>
+        <form hx-post="/account/credentials" hx-target="#account" hx-swap="outerHTML">
+            <label>API ID
+                <input type="text" name="api_id" inputmode="numeric" value="{{if .Creds.APIID}}{{.Creds.APIID}}{{end}}" required>
+            </label>
+            <label>API hash
+                <input type="text" name="api_hash" value="{{.Creds.APIHash}}" required>
+            </label>
+            <label>Phone number
+                <input type="tel" name="phone" placeholder="+12025550123" value="{{.Creds.Phone}}" required>
+            </label>
+            <button type="submit">{{if eq .Auth.State.String "failed"}}Try again{{else}}Connect{{end}}</button>
+        </form>
+    {{end}}
+</section>
+{{end}}

@@ -1,0 +1,48 @@
+{{define "status"}}
+<section id="status" class="card" hx-get="/partials/status" hx-trigger="every 5s" hx-target="this" hx-swap="outerHTML">
+    <div class="card-head">
+        <h2>Status</h2>
+        <button type="button" hx-post="/poll" hx-target="#status" hx-swap="outerHTML">Poll now</button>
+    </div>
+    <dl class="facts">
+        <dt>Telegram</dt>
+        <dd class="state state-{{.Status.Auth.State}}">
+            {{.Status.Auth.State}}{{if .Status.Auth.Account}} — {{.Status.Auth.Account}}{{end}}
+        </dd>
+        <dt>Last poll</dt>
+        <dd>
+            {{if .Status.Poll.Polling}}running…
+            {{else}}{{timeOr .Status.Poll.LastPollAt "never"}}
+                {{with ago .Status.Now .Status.Poll.LastPollAt}}<span class="muted">({{.}})</span>{{end}}
+            {{end}}
+        </dd>
+        <dt>Next poll</dt>
+        <dd>{{timeOr .Status.Poll.NextPollAt "—"}}</dd>
+        {{if not .Status.Poll.PausedUntil.IsZero}}
+            <dt>Paused until</dt>
+            <dd class="warn">{{timeOr .Status.Poll.PausedUntil "—"}} (Telegram rate limit)</dd>
+        {{end}}
+        <dt>Endpoint</dt>
+        <dd>{{if .Status.Settings.Endpoint.URL}}<code>{{.Status.Settings.Endpoint.URL}}</code>{{else}}<span class="warn">not configured</span>{{end}}</dd>
+    </dl>
+    {{with .Status.Poll.LastError}}<p class="error">{{.}}</p>{{end}}
+
+    {{if .Status.Channels}}
+        <table>
+            <thead>
+            <tr><th>Channel</th><th>Last message</th><th>Last polled</th><th>Last error</th></tr>
+            </thead>
+            <tbody>
+            {{range .Status.Channels}}
+                <tr{{if not .Enabled}} class="disabled"{{end}}>
+                    <td><a href="{{.Link}}" target="_blank" rel="noreferrer">{{.DisplayName}}</a>{{if not .Enabled}} <span class="muted">(paused)</span>{{end}}</td>
+                    <td>{{if .Cursor}}{{.Cursor}}{{else}}—{{end}}</td>
+                    <td>{{timeOr .LastPolledAt "never"}}</td>
+                    <td class="error-cell">{{with .LastError}}{{.}}{{else}}—{{end}}</td>
+                </tr>
+            {{end}}
+            </tbody>
+        </table>
+    {{end}}
+</section>
+{{end}}
